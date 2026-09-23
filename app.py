@@ -44,9 +44,11 @@ def check_password():
             st.error("⛔ Security configuration error: Password secret is missing. Access denied.")
             return
 
-        if st.session_state["password_input"] == correct_password:
+        # Safely get the password to prevent KeyErrors
+        if st.session_state.get("password_input") == correct_password:
             st.session_state["password_correct"] = True
-            del st.session_state["password_input"]
+            if "password_input" in st.session_state:
+                del st.session_state["password_input"]
         else:
             st.session_state["password_correct"] = False
 
@@ -163,6 +165,30 @@ if master_df is not None:
     available_dates.sort()
     latest_date = available_dates[-1]
 
+    # ==========================================
+    # 🎛️ GLOBAL CASCADING FILTERS
+    # ==========================================
+    st.markdown("### 🎛️ Global Data Filters")
+    filter_col1, filter_col2 = st.columns(2)
+    
+    with filter_col1:
+        all_programs = sorted([p for p in master_df['Program'].unique() if p != "N/A"])
+        selected_programs = st.multiselect("Filter Program:", all_programs, default=all_programs)
+    
+    # Cascade: Filter the master list by Program first so the Type list shrinks accordingly
+    filtered_master = master_df[master_df['Program'].isin(selected_programs)].copy()
+    
+    with filter_col2:
+        if 'Type' in filtered_master.columns:
+            all_types = sorted([t for t in filtered_master['Type'].unique() if t != "N/A"])
+            selected_types = st.multiselect("Filter Type (PA, TRX, etc.):", all_types, default=all_types)
+            # Apply the Type filter to our base dataset
+            filtered_master = filtered_master[filtered_master['Type'].isin(selected_types)]
+        else:
+            selected_types = None
+
+    st.divider()
+
     # Mode Selector
     mode = st.radio(
         "Select Perspective:",
@@ -170,42 +196,24 @@ if master_df is not None:
         horizontal=True
     )
 
+    # ==========================================
     # MODE 1: LIVE STATUS
+    # ==========================================
     if mode == "🟢 LIVE Status (Latest Snapshot)":
         st.caption(f"Showing live floor snapshot from **{latest_date.strftime('%b %d, %Y')}**")
         
-        # Filter to the latest date
-        live_df = master_df[master_df['Snapshot Date'].dt.date == latest_date].copy()
-
-        # Filters
-        filter_col1, filter_col2 = st.columns(2)
-        with filter_col1:
-            all_programs = sorted([p for p in live_df['Program'].unique() if p != "N/A"])
-            selected_programs = st.multiselect("Filter Program:", all_programs, default=all_programs)
-        
-        with filter_col2:
-            # Safely check for Type column, otherwise use a placeholder or skip
-            if 'Type' in live_df.columns:
-                all_types = sorted([t for t in live_df['Type'].unique() if t != "N/A"])
-                selected_types = st.multiselect("Filter Type (PA, TRX, etc.):", all_types, default=all_types)
-            else:
-                st.info("No 'Type' column detected in dataset.")
-                selected_types = None
-
-        # Apply Filters
-        filtered_live = live_df[live_df['Program'].isin(selected_programs)]
-        if 'Type' in live_df.columns and selected_types is not None:
-            filtered_live = filtered_live[filtered_live['Type'].isin(selected_types)]
+        # Filter to the latest date using our globally filtered dataset
+        live_df = filtered_master[filtered_master['Snapshot Date'].dt.date == latest_date].copy()
 
         # --- EXPLICIT SHEET 9 LOGIC ---
         AOI_PROCESSES = ['AOI', 'AOI  Inspect', 'AOR1 AOI Repair S1', 'AOR2 AOI Repair S2']
         FDX_PROCESSES = ['5DX', 'RWK 5DX']
 
-        # Metrics calculated off the explicitly filtered lists
-        total_wip = filtered_live['Qty'].sum()
-        live_aoi_load = filtered_live[filtered_live['Process'].isin(AOI_PROCESSES)]['Qty'].sum()
-        live_5dx_load = filtered_live[filtered_live['Process'].isin(FDX_PROCESSES)]['Qty'].sum()
-        live_debug_load = filtered_live[filtered_live['Station Group'] == 'Debug / Repair']['Qty'].sum()
+        # Metrics calculated off the explicit lists
+        total_wip = live_df['Qty'].sum()
+        live_aoi_load = live_df[live_df['Process'].isin(AOI_PROCESSES)]['Qty'].sum()
+        live_5dx_load = live_df[live_df['Process'].isin(FDX_PROCESSES)]['Qty'].sum()
+        live_debug_load = live_df[live_df['Station Group'] == 'Debug / Repair']['Qty'].sum()
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("📦 Live Total WIP", f"{int(total_wip):,} units")
@@ -221,21 +229,15 @@ if master_df is not None:
         latest_dt = pd.to_datetime(latest_date)
         seven_days_ago = latest_dt - pd.Timedelta(days=7)
         
-        # Filter master_df down to the last 7 days AND apply the dropdown filters
-        df_7d = master_df[master_df['Snapshot Date'] >= seven_days_ago].copy()
-        df_7d = df_7d[df_7d['Program'].isin(selected_programs)]
-        if 'Type' in df_7d.columns and selected_types is not None:
-            df_7d = df_7d[df_7d['Type'].isin(selected_types)]
+        # Use our globally filtered dataset for the trajectory
+        df_7d = filtered_master[filtered_master['Snapshot Date'] >= seven_days_ago].copy()
 
-        # Group historical data by the exact Sheet 9 processes
         aoi_trend = df_7d[df_7d['Process'].isin(AOI_PROCESSES)].groupby('Snapshot Date')['Qty'].sum().reset_index(name='AOI Load')
         fdx_trend = df_7d[df_7d['Process'].isin(FDX_PROCESSES)].groupby('Snapshot Date')['Qty'].sum().reset_index(name='5DX Load')
 
-        # Merge them together into one clean table
         trend_df = pd.merge(aoi_trend, fdx_trend, on='Snapshot Date', how='outer').fillna(0).sort_values('Snapshot Date')
         trend_df['Date Str'] = trend_df['Snapshot Date'].dt.strftime('%b %d')
 
-        # Build a premium corporate-styled Plotly line chart
         fig_trajectory = px.line(
             trend_df, 
             x='Date Str', 
@@ -245,14 +247,9 @@ if master_df is not None:
         )
 
         fig_trajectory.update_layout(
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='rgba(0,0,0,0)',
-            font=dict(color='white'),
-            legend_title_text='Workstation',
-            xaxis_title='',
-            yaxis_title='Unit Load (Qty)',
-            hovermode='x unified',
-            margin=dict(l=0, r=0, t=30, b=0)
+            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'),
+            legend_title_text='Workstation', xaxis_title='', yaxis_title='Unit Load (Qty)',
+            hovermode='x unified', margin=dict(l=0, r=0, t=30, b=0)
         )
 
         st.plotly_chart(fig_trajectory, use_container_width=True)
@@ -261,17 +258,19 @@ if master_df is not None:
         # --- BAR CHARTS ---
         c1, c2 = st.columns(2)
         with c1:
-            fig_live_proc = px.bar(filtered_live, x="Program", y="Qty", color="Station Group", title="Live Station Distribution", height=420, color_discrete_sequence=px.colors.qualitative.Prism)
+            fig_live_proc = px.bar(live_df, x="Program", y="Qty", color="Station Group", title="Live Station Distribution", height=420, color_discrete_sequence=px.colors.qualitative.Prism)
             fig_live_proc.update_layout(barmode='stack', plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', font_color="white")
             st.plotly_chart(fig_live_proc, use_container_width=True)
 
         with c2:
-            wo_sum = filtered_live.groupby(['Work order', 'Program'])['Qty'].sum().reset_index().sort_values(by='Qty', ascending=False).head(10)
+            wo_sum = live_df.groupby(['Work order', 'Program'])['Qty'].sum().reset_index().sort_values(by='Qty', ascending=False).head(10)
             fig_wo = px.bar(wo_sum, x="Qty", y="Work order", color="Program", orientation='h', title="Top 10 Work Orders", height=420, color_discrete_sequence=px.colors.qualitative.Pastel)
             fig_wo.update_layout(yaxis={'categoryorder':'total ascending'}, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', font_color="white")
             st.plotly_chart(fig_wo, use_container_width=True)
 
+    # ==========================================
     # MODE 2: HISTORICAL TRENDS
+    # ==========================================
     elif mode == "📈 Historical Station Trends":
         st.subheader("📊 Factory Backlog Trajectory")
         
@@ -288,13 +287,11 @@ if master_df is not None:
             st.info("Only one day of data available. Slider disabled.")
             start_date, end_date = available_dates[0], available_dates[0]
 
-        # Filter master data based on date slider
-        mask = (master_df['Snapshot Date'].dt.date >= start_date) & (master_df['Snapshot Date'].dt.date <= end_date)
-        history_df = master_df.loc[mask]
+        # Filter the already globally-filtered master data based on date slider
+        mask = (filtered_master['Snapshot Date'].dt.date >= start_date) & (filtered_master['Snapshot Date'].dt.date <= end_date)
+        history_df = filtered_master.loc[mask].copy()
 
         trend_df = history_df.groupby(['Snapshot Date', 'Station Group'])['Qty'].sum().reset_index()
-        
-        # Create user-friendly date strings for the charts/tables
         trend_df['Date Str'] = trend_df['Snapshot Date'].dt.strftime('%b %d')
 
         fig_area = px.area(
@@ -302,7 +299,6 @@ if master_df is not None:
             title=f"Total Factory Backlog ({start_date.strftime('%b %d')} to {end_date.strftime('%b %d')})", 
             height=500, color_discrete_sequence=px.colors.qualitative.Bold
         )
-        # Force the x-axis to respect chronological order, not alphabetical string order
         chronological_date_strs = trend_df.drop_duplicates('Snapshot Date').sort_values('Snapshot Date')['Date Str'].tolist()
         fig_area.update_xaxes(categoryorder='array', categoryarray=chronological_date_strs)
         fig_area.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', font_color="white", xaxis_title="Date", yaxis_title="WIP Quantity")
@@ -310,11 +306,9 @@ if master_df is not None:
         st.plotly_chart(fig_area, use_container_width=True)
 
         st.subheader("📋 Historical Matrix")
-        # Format dates nicely for the table columns
         history_df['Date Str'] = history_df['Snapshot Date'].dt.strftime('%b %d')
         pivot_history = history_df.pivot_table(index='Station Group', columns='Date Str', values='Qty', aggfunc='sum', fill_value=0)
         
-        # Reorder matrix columns strictly by chronological date
         ordered_cols = [col for col in chronological_date_strs if col in pivot_history.columns]
         pivot_history = pivot_history[ordered_cols]
         
