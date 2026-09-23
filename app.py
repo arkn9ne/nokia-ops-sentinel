@@ -197,18 +197,68 @@ if master_df is not None:
         if 'Type' in live_df.columns and selected_types is not None:
             filtered_live = filtered_live[filtered_live['Type'].isin(selected_types)]
 
-        # Metrics
+        # --- EXPLICIT SHEET 9 LOGIC ---
+        AOI_PROCESSES = ['AOI', 'AOI  Inspect', 'AOR1 AOI Repair S1', 'AOR2 AOI Repair S2']
+        FDX_PROCESSES = ['5DX', 'RWK 5DX']
+
+        # Metrics calculated off the explicitly filtered lists
         total_wip = filtered_live['Qty'].sum()
-        aoi_count = filtered_live[filtered_live['Station Group'] == 'AOI']['Qty'].sum()
-        fdx_count = filtered_live[filtered_live['Station Group'] == '5DX']['Qty'].sum()
-        debug_count = filtered_live[filtered_live['Station Group'] == 'Debug / Repair']['Qty'].sum()
+        live_aoi_load = filtered_live[filtered_live['Process'].isin(AOI_PROCESSES)]['Qty'].sum()
+        live_5dx_load = filtered_live[filtered_live['Process'].isin(FDX_PROCESSES)]['Qty'].sum()
+        live_debug_load = filtered_live[filtered_live['Station Group'] == 'Debug / Repair']['Qty'].sum()
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("📦 Live Total WIP", f"{int(total_wip):,} units")
-        m2.metric("🔍 Live AOI Load", f"{int(aoi_count):,} units")
-        m3.metric("⚡ Live 5DX Load", f"{int(fdx_count):,} units")
-        m4.metric("🛠️ Live Debug / Repair", f"{int(debug_count):,} units")
+        m2.metric("🔵 Live AOI Load", f"{int(live_aoi_load):,} units")
+        m3.metric("⚡ Live 5DX Load", f"{int(live_5dx_load):,} units")
+        m4.metric("🛠️ Live Debug / Repair", f"{int(live_debug_load):,} units")
 
+        st.divider()
+
+        # --- 7-DAY TRAJECTORY CHART ---
+        st.markdown("### 🔥 Escalated Workstations: 7-Day Progression Trajectory")
+        
+        latest_dt = pd.to_datetime(latest_date)
+        seven_days_ago = latest_dt - pd.Timedelta(days=7)
+        
+        # Filter master_df down to the last 7 days AND apply the dropdown filters
+        df_7d = master_df[master_df['Snapshot Date'] >= seven_days_ago].copy()
+        df_7d = df_7d[df_7d['Program'].isin(selected_programs)]
+        if 'Type' in df_7d.columns and selected_types is not None:
+            df_7d = df_7d[df_7d['Type'].isin(selected_types)]
+
+        # Group historical data by the exact Sheet 9 processes
+        aoi_trend = df_7d[df_7d['Process'].isin(AOI_PROCESSES)].groupby('Snapshot Date')['Qty'].sum().reset_index(name='AOI Load')
+        fdx_trend = df_7d[df_7d['Process'].isin(FDX_PROCESSES)].groupby('Snapshot Date')['Qty'].sum().reset_index(name='5DX Load')
+
+        # Merge them together into one clean table
+        trend_df = pd.merge(aoi_trend, fdx_trend, on='Snapshot Date', how='outer').fillna(0).sort_values('Snapshot Date')
+        trend_df['Date Str'] = trend_df['Snapshot Date'].dt.strftime('%b %d')
+
+        # Build a premium corporate-styled Plotly line chart
+        fig_trajectory = px.line(
+            trend_df, 
+            x='Date Str', 
+            y=['AOI Load', '5DX Load'],
+            markers=True,
+            color_discrete_map={'AOI Load': '#00d4ff', '5DX Load': '#ff5722'} 
+        )
+
+        fig_trajectory.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='white'),
+            legend_title_text='Workstation',
+            xaxis_title='',
+            yaxis_title='Unit Load (Qty)',
+            hovermode='x unified',
+            margin=dict(l=0, r=0, t=30, b=0)
+        )
+
+        st.plotly_chart(fig_trajectory, use_container_width=True)
+        st.divider()
+
+        # --- BAR CHARTS ---
         c1, c2 = st.columns(2)
         with c1:
             fig_live_proc = px.bar(filtered_live, x="Program", y="Qty", color="Station Group", title="Live Station Distribution", height=420, color_discrete_sequence=px.colors.qualitative.Prism)
